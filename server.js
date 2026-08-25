@@ -50,6 +50,11 @@ kalshiClient.getBalance().then(b => {
 }).catch(e => {
   console.error(`[startup] Kalshi auth check FAILED: ${e.message}`);
 });
+kalshiClient._request('GET', '/account/limits', { auth: true }).then(l => {
+  console.log(`[startup] Kalshi account limits: ${JSON.stringify(l)}`);
+}).catch(e => {
+  console.error(`[startup] Kalshi account limits FAILED: ${e.message}`);
+});
 
 // Lets Kalshi API credentials be entered from the dashboard instead of only
 // via env vars/a key file on disk. Stored in plaintext in DATA_DIR
