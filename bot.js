@@ -5160,10 +5160,12 @@ class TradingBot {
    * Personal Wallet is never spendable here (or anywhere else).
    */
   _tradingSpendableCents() {
-    // In live mode, use only the real Kalshi balance (minus in-flight reservations)
-    // as the spending cap — the paper "available" bucket is irrelevant to what
-    // the exchange will actually accept.
-    if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)) {
+    // In live mode, use only the real Kalshi balance (minus in-flight reservations).
+    // The paper "available" bucket is irrelevant to what the exchange will accept.
+    // If liveBalanceCents hasn't been fetched yet, return 0 so the bot waits rather
+    // than gating on the paper bucket which has nothing to do with real funds.
+    if (this.config.mode === 'live') {
+      if (!Number.isFinite(this.liveBalanceCents)) return 0;
       const reserved = Math.max(0, Number(this._liveBalanceReservedCents) || 0);
       return Math.max(0, Math.round(this.liveBalanceCents) - reserved);
     }
@@ -5257,20 +5259,15 @@ class TradingBot {
   _assertEntryFundedFromAvailable(entryCostCents, label = '') {
     const cost = Math.round(Number(entryCostCents) || 0);
     if (!(cost > 0)) return true;
-    const capital = this._capitalStatus();
-    const available = Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
     const spendable = this._tradingSpendableCents();
     if (cost <= spendable) return true;
-    const wallet = Math.max(0, Math.round(Number(capital.reserveCents) || 0));
-    const insurance = Math.max(0, Math.round(Number(capital.insuranceCents) || 0));
-    const liveBit =
-      this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)
-        ? ` · Kalshi cash $${(this.liveBalanceCents / 100).toFixed(2)}`
-        : '';
+    // In live mode show Kalshi balance; in paper mode show the paper bucket.
+    const isLive = this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents);
+    const haveStr = isLive
+      ? `Kalshi $${(this.liveBalanceCents / 100).toFixed(2)}`
+      : `Available $${((Number(this._capitalStatus().paperAvailableCents) || 0) / 100).toFixed(2)}`;
     const waitMessage =
-      `Waiting for funds: need $${(cost / 100).toFixed(2)} from Available ` +
-        `(have $${(available / 100).toFixed(2)}${liveBit}). ` +
-        `Wallet $${(wallet / 100).toFixed(2)} + Insurance $${(insurance / 100).toFixed(2)} stay locked` +
+      `Waiting for funds: need $${(cost / 100).toFixed(2)} (have ${haveStr})` +
         (label ? ` — ${label}` : '') +
         '. New entries will resume automatically once funded.';
     this.lastError = waitMessage;
@@ -9004,7 +9001,7 @@ class TradingBot {
       // can be stale if earlier parallel orders consumed funds since the last poll.
       try {
         const _freshBal = await this.client.getBalance();
-        const _freshCents = Math.round(Number(_freshBal.balance) * 100);
+        const _freshCents = Number(_freshBal.balance);
         if (Number.isFinite(_freshCents)) {
           this.liveBalanceCents = _freshCents;
           this.liveBalanceUpdatedAt = Date.now();
@@ -9624,8 +9621,8 @@ class TradingBot {
     ) {
       try {
         const balance = await this.client.getBalance();
-        this.liveBalanceCents = Math.round(Number(balance.balance) * 100);
-        this.livePortfolioValueCents = Math.round(Number(balance.portfolio_value) * 100);
+        this.liveBalanceCents = Number(balance.balance);
+        this.livePortfolioValueCents = Number(balance.portfolio_value);
         this.liveBalanceUpdatedAt = Date.now();
       } catch (err) {
         this.lastError = `Unable to refresh live balance: ${err.message}`;
@@ -9665,13 +9662,14 @@ class TradingBot {
         ? Number(this.config.modelMinEntryCents) || MODEL_MIN_ENTRY_DEFAULT_CENTS
         : Number(this.config.minEntryCents) || 40;
       const floorCents = Math.max(1, Math.round(minEntry) || 65);
-      if (this._tradingSpendableCents() < floorCents) {
-        const capital = this._capitalStatus();
+      const spendable = this._tradingSpendableCents();
+      if (spendable < floorCents) {
+        const isLive = this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents);
+        const haveStr = isLive
+          ? `Kalshi $${(this.liveBalanceCents / 100).toFixed(2)}`
+          : `Available $${((Number(this._capitalStatus().paperAvailableCents) || 0) / 100).toFixed(2)}`;
         const waitMessage =
-          `Waiting for funds: Available $${((Number(capital.paperAvailableCents) || 0) / 100).toFixed(2)} ` +
-            `can't fund a new contract (need ≥${floorCents}¢). ` +
-            `Wallet $${((Number(capital.reserveCents) || 0) / 100).toFixed(2)} + ` +
-            `Insurance $${((Number(capital.insuranceCents) || 0) / 100).toFixed(2)} stay locked. ` +
+          `Waiting for funds: ${haveStr} can't fund a new contract (need ≥${floorCents}¢). ` +
             `New entries will resume automatically once funded.`;
         this.lastError = waitMessage;
         this.lastDecision = waitMessage;
