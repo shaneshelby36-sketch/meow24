@@ -225,6 +225,7 @@ function buildCreateOrderV2Body({
   priceCents,
   clientOrderId,
   timeInForce = 'good_till_canceled',
+  exchangeIndex,
 }) {
   const rounded = Math.round(Number(priceCents));
   if (!Number.isFinite(rounded) || rounded < 1 || rounded > 99) {
@@ -241,7 +242,7 @@ function buildCreateOrderV2Body({
   }
   const tif = String(timeInForce || 'good_till_canceled').toLowerCase();
   const allowedTif = new Set(['good_till_canceled', 'immediate_or_cancel', 'fill_or_kill']);
-  return {
+  const body = {
     ticker,
     side: bookSideFromLegacy(side, action),
     count: `${contracts}.00`,
@@ -250,6 +251,13 @@ function buildCreateOrderV2Body({
     self_trade_prevention_type: 'taker_at_cross',
     client_order_id: clientOrderId || crypto.randomUUID(),
   };
+  // exchange_index routes the order to the correct exchange shard.
+  // Crypto 15m markets (KXBTC15M, KXETH15M, etc.) live on shard 2.
+  // Omitting it causes Kalshi to look on shard 0 (elections) and return
+  // market_not_found even when GET /markets/{ticker} confirms the market active.
+  const idx = Number(exchangeIndex);
+  if (Number.isFinite(idx)) body.exchange_index = idx;
+  return body;
 }
 
 /**
@@ -789,7 +797,7 @@ class KalshiClient {
    * Uses Create Order V2 (POST /portfolio/events/orders). Returns a shape
    * compatible with legacy callers: `{ order: { order_id, ... } }`.
    */
-  async createOrder({ ticker, side, action, count, priceCents, clientOrderId, timeInForce }) {
+  async createOrder({ ticker, side, action, count, priceCents, clientOrderId, timeInForce, exchangeIndex }) {
     const body = buildCreateOrderV2Body({
       ticker,
       side,
@@ -798,6 +806,7 @@ class KalshiClient {
       priceCents,
       clientOrderId,
       timeInForce,
+      exchangeIndex,
     });
     const data = await this._request('POST', '/portfolio/events/orders', { body });
     return normalizeCreateOrderResponse(data);

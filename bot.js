@@ -6557,12 +6557,16 @@ class TradingBot {
         let lastErr = null;
         let soldOk = false;
         let workingBase = baseSellPrice;
+        // Fetch market once up-front so exchange_index is available on attempt 0.
+        let exitMkt = null;
+        try { exitMkt = await this._getMarketBounded(trade.ticker, 1500); } catch { /* best-effort */ }
 
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
           if (attempt > 0) {
             try {
               const mkt = await this._getMarketBounded(trade.ticker, 1500);
-              const liveBid = mkt ? this._heldSideBidCents(trade, mkt) : null;
+              if (mkt) exitMkt = mkt;
+              const liveBid = exitMkt ? this._heldSideBidCents(trade, exitMkt) : null;
               if (Number.isFinite(liveBid) && liveBid >= 1 && liveBid <= 99) {
                 workingBase = Math.round(liveBid);
               }
@@ -6587,6 +6591,7 @@ class TradingBot {
               count: trade.contracts,
               priceCents: sellPrice,
               timeInForce: 'immediate_or_cancel',
+              exchangeIndex: exitMkt && exitMkt.exchange_index != null ? exitMkt.exchange_index : undefined,
             });
             const orderId = this._extractOrderId(order);
             if (!orderId) throw new Error('sell response missing order_id');
@@ -8682,6 +8687,7 @@ class TradingBot {
             count: stub.contracts,
             priceCents: sellPrice,
             timeInForce: 'immediate_or_cancel',
+            exchangeIndex: market && market.exchange_index != null ? market.exchange_index : undefined,
           });
           const orderId = this._extractOrderId(order);
           if (!orderId) throw new Error('sell response missing order_id');
@@ -9158,9 +9164,12 @@ class TradingBot {
           side,
           action: 'buy',
           count: trade.contracts,
-            priceCents: workingPrice,
-            timeInForce: 'immediate_or_cancel',
-          });
+          priceCents: workingPrice,
+          timeInForce: 'immediate_or_cancel',
+          exchangeIndex: liveMarket && liveMarket.exchange_index != null
+            ? liveMarket.exchange_index
+            : undefined,
+        });
           orderId = this._extractOrderId(order);
           if (!orderId) {
             lastErr = new Error('createOrder returned no order_id');
