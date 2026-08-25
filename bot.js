@@ -10079,7 +10079,7 @@ class TradingBot {
     }
 
     const side = edge > 0 ? 'yes' : 'no';
-    const priceCents = side === 'yes' ? yesAsk : 100 - yesBid;
+    const priceCents = side === 'yes' ? yesAsk : 100 - yesAsk;
     if (!Number.isFinite(priceCents) || priceCents < 1 || priceCents > 99) {
       this.lastError = `Skipped ${symbol}: selected ${side.toUpperCase()} price is unavailable.`;
       return null;
