@@ -9000,6 +9000,16 @@ class TradingBot {
       // Shadow-copy the ticker so we can re-assign it inside the loop when the
       // window rolls over between opportunity evaluation and order submission.
       let activeTicker = ticker;
+      // Fetch a fresh balance immediately before ordering — the 15s cached value
+      // can be stale if earlier parallel orders consumed funds since the last poll.
+      try {
+        const _freshBal = await this.client.getBalance();
+        const _freshCents = Number(_freshBal.balance);
+        if (Number.isFinite(_freshCents)) {
+          this.liveBalanceCents = _freshCents;
+          this.liveBalanceUpdatedAt = Date.now();
+        }
+      } catch (_balErr) { /* non-fatal — proceed with cached value */ }
       // Reserve the expected cost against liveBalanceCents so parallel entries
       // don't all see the same full balance and collectively over-spend.
       const _reserveCents = Math.round(trade.contracts * priceCents);
