@@ -8984,6 +8984,9 @@ class TradingBot {
       let workingPrice = priceCents;
       let lastErr = null;
       let freshAsk = null;
+      // Shadow-copy the ticker so we can re-assign it inside the loop when the
+      // window rolls over between opportunity evaluation and order submission.
+      let activeTicker = ticker;
       const rawAttempts = Number(entryAttempts);
       const maxEntryAttempts =
         Number.isFinite(rawAttempts) && rawAttempts > 0
@@ -9011,13 +9014,35 @@ class TradingBot {
           break;
         }
 
+        // Refresh the live market ticker before every order attempt.
+        // The opportunity was evaluated up to several seconds ago; if the
+        // 15m window rolled over in that time the cached ticker is dead and
+        // the exchange returns market_not_found. Resolve fresh every attempt.
+        const seriesForRefresh = SERIES_BY_SYMBOL[symbol];
+        if (seriesForRefresh && this.client) {
+          try {
+            const freshMarket = await this._fetchLiveMarket(seriesForRefresh, 1000);
+            if (freshMarket && freshMarket.ticker && freshMarket.ticker !== activeTicker) {
+              console.warn(
+                `[bot] ticker refresh: ${activeTicker} → ${freshMarket.ticker} (window rolled mid-entry)`
+              );
+              activeTicker = freshMarket.ticker;
+            } else if (!freshMarket) {
+              console.warn(`[bot] ${symbol} entry attempt ${attempt + 1}: no live market found, aborting`);
+              break;
+            }
+          } catch (_refreshErr) {
+            // Non-fatal: keep the current ticker and attempt the order
+          }
+        }
+
         let liveMarket = null;
         try {
-          liveMarket = await this._getMarketBounded(ticker, 2000);
+          liveMarket = await this._getMarketBounded(activeTicker, 2000);
         } catch {
           liveMarket = null;
         }
-        freshAsk = await this._refreshLiveEntryAskCents(ticker, side);
+        freshAsk = await this._refreshLiveEntryAskCents(activeTicker, side);
         const band = isSettle ? settleSideEntryBand(this.config, side, minutesLeft) : null;
         const richFloor = isSettle ? settleRichAskFloorCents(this.config) : 100;
         const ceiling = isSettle
@@ -9112,7 +9137,7 @@ class TradingBot {
         let _directVerify = 'skipped';
         if (this.client && typeof this.client.getMarket === 'function') {
           try {
-            const _dm = await this.client.getMarket(ticker);
+            const _dm = await this.client.getMarket(activeTicker);
             _directVerify = _dm
               ? `found(status=${_dm.status},close=${_dm.close_time})`
               : 'null';
@@ -9122,14 +9147,14 @@ class TradingBot {
         }
         console.log(
           `[diag:preOrder] attempt=${attempt + 1} symbol=${symbol} side=${side}` +
-          ` ticker=${ticker} utc=${_preUtc}` +
+          ` ticker=${activeTicker} utc=${_preUtc}` +
           ` windowClose=${_preClose} msSinceEval=${_msSinceSelected}` +
           ` price=${workingPrice} directVerify=${_directVerify}`
         );
       }
       try {
         const order = await this.client.createOrder({
-          ticker,
+          ticker: activeTicker,
           side,
           action: 'buy',
           count: trade.contracts,
@@ -9174,12 +9199,10 @@ class TradingBot {
       } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
-          // market_not_found means the cached ticker is dead — no point retrying
-          // with the same ticker on subsequent attempts in this loop.
-          const isMarketNotFound =
-            (Number(err.status) === 404 || /HTTP 404\b/.test(String(err.message))) &&
-            /market_not_found/.test(String(err.message));
-          if (isMarketNotFound) break;
+          // market_not_found: ticker refresh at the top of the next iteration
+          // will resolve the new window's ticker, so continue rather than break.
+          // Only bail immediately if we've exhausted all attempts or if the
+          // error is not recoverable.
         }
       }
 
