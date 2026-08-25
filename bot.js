@@ -9014,7 +9014,8 @@ class TradingBot {
       console.log(
         `[diag:balance] ${symbol} entry liveBalanceCents=${this.liveBalanceCents}` +
         ` reserved=${_reserved} reserving=${_reserveCents}` +
-        ` spendable=${this._tradingSpendableCents()}`
+        ` spendable=${this._tradingSpendableCents()}` +
+        ` priceCents=${priceCents} contracts=${trade.contracts} entryCost=${Math.round(trade.contracts * priceCents)}`
       );
       if (Number.isFinite(this.liveBalanceCents)) {
         this._liveBalanceReservedCents = _reserved + _reserveCents;
@@ -9609,6 +9610,7 @@ class TradingBot {
     this._cyclePredictions = predictions || null;
     try {
     this._stoppedSymbolsThisCycle = new Set();
+    this._liveBalanceReservedCents = 0;
     this._maybeRotateLedger(Date.now());
 
     const hasOpenInventory = Array.isArray(this.openTrades) && this.openTrades.length > 0;
