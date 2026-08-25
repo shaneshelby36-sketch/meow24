@@ -4390,6 +4390,10 @@ class TradingBot {
     this.liveBalanceCents = null;
     this.livePortfolioValueCents = null;
     this.liveBalanceUpdatedAt = null;
+    // Cents reserved by in-flight live orders that have not yet filled or failed.
+    // Prevents parallel entries from all seeing the same full balance and
+    // collectively over-spending (each deducts here before sending; restores on failure).
+    this._liveBalanceReservedCents = 0;
     // Last post-stop protection gate logged to activity (dedupe poll spam).
     this._lastProtectionGateKey = null;
     this._lastProtectionGateSymbol = null;
@@ -5159,7 +5163,8 @@ class TradingBot {
     const capital = this._capitalStatus();
     const available = Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
     if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)) {
-      return Math.max(0, Math.min(available, Math.round(this.liveBalanceCents)));
+      const reserved = Math.max(0, Number(this._liveBalanceReservedCents) || 0);
+      return Math.max(0, Math.min(available, Math.round(this.liveBalanceCents) - reserved));
     }
     return available;
   }
@@ -8993,6 +8998,12 @@ class TradingBot {
       // Shadow-copy the ticker so we can re-assign it inside the loop when the
       // window rolls over between opportunity evaluation and order submission.
       let activeTicker = ticker;
+      // Reserve the expected cost against liveBalanceCents so parallel entries
+      // don't all see the same full balance and collectively over-spend.
+      const _reserveCents = Math.round(trade.contracts * priceCents);
+      if (Number.isFinite(this.liveBalanceCents)) {
+        this._liveBalanceReservedCents = (Number(this._liveBalanceReservedCents) || 0) + _reserveCents;
+      }
       const rawAttempts = Number(entryAttempts);
       const maxEntryAttempts =
         Number.isFinite(rawAttempts) && rawAttempts > 0
@@ -9213,6 +9224,11 @@ class TradingBot {
           // Only bail immediately if we've exhausted all attempts or if the
           // error is not recoverable.
         }
+      }
+
+      // Always release the reservation — whether the order filled, failed, or threw.
+      if (Number.isFinite(this.liveBalanceCents)) {
+        this._liveBalanceReservedCents = Math.max(0, (Number(this._liveBalanceReservedCents) || 0) - _reserveCents);
       }
 
       // If every attempt failed with market_not_found, the series cache holds a
