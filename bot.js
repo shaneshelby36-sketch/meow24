@@ -9004,7 +9004,7 @@ class TradingBot {
       // can be stale if earlier parallel orders consumed funds since the last poll.
       try {
         const _freshBal = await this.client.getBalance();
-        const _freshCents = Number(_freshBal.balance);
+        const _freshCents = Math.round(Number(_freshBal.balance) * 100);
         if (Number.isFinite(_freshCents)) {
           this.liveBalanceCents = _freshCents;
           this.liveBalanceUpdatedAt = Date.now();
@@ -9624,8 +9624,8 @@ class TradingBot {
     ) {
       try {
         const balance = await this.client.getBalance();
-        this.liveBalanceCents = Number(balance.balance);
-        this.livePortfolioValueCents = Number(balance.portfolio_value);
+        this.liveBalanceCents = Math.round(Number(balance.balance) * 100);
+        this.livePortfolioValueCents = Math.round(Number(balance.portfolio_value) * 100);
         this.liveBalanceUpdatedAt = Date.now();
       } catch (err) {
         this.lastError = `Unable to refresh live balance: ${err.message}`;
