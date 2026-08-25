@@ -5160,13 +5160,15 @@ class TradingBot {
    * Personal Wallet is never spendable here (or anywhere else).
    */
   _tradingSpendableCents() {
-    const capital = this._capitalStatus();
-    const available = Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
+    // In live mode, use only the real Kalshi balance (minus in-flight reservations)
+    // as the spending cap — the paper "available" bucket is irrelevant to what
+    // the exchange will actually accept.
     if (this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents)) {
       const reserved = Math.max(0, Number(this._liveBalanceReservedCents) || 0);
-      return Math.max(0, Math.min(available, Math.round(this.liveBalanceCents) - reserved));
+      return Math.max(0, Math.round(this.liveBalanceCents) - reserved);
     }
-    return available;
+    const capital = this._capitalStatus();
+    return Math.max(0, Math.round(Number(capital.paperAvailableCents) || 0));
   }
 
   /** Pause new entries permanently until the user starts the bot again. */
