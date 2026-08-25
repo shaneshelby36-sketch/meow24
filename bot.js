@@ -9003,8 +9003,14 @@ class TradingBot {
       // Reserve the expected cost against liveBalanceCents so parallel entries
       // don't all see the same full balance and collectively over-spend.
       const _reserveCents = Math.round(trade.contracts * priceCents);
+      const _reserved = Number(this._liveBalanceReservedCents) || 0;
+      console.log(
+        `[diag:balance] ${symbol} entry liveBalanceCents=${this.liveBalanceCents}` +
+        ` reserved=${_reserved} reserving=${_reserveCents}` +
+        ` spendable=${this._tradingSpendableCents()}`
+      );
       if (Number.isFinite(this.liveBalanceCents)) {
-        this._liveBalanceReservedCents = (Number(this._liveBalanceReservedCents) || 0) + _reserveCents;
+        this._liveBalanceReservedCents = _reserved + _reserveCents;
       }
       const rawAttempts = Number(entryAttempts);
       const maxEntryAttempts =
