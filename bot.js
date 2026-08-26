@@ -9006,6 +9006,10 @@ class TradingBot {
           this.liveBalanceCents = _freshCents;
           this.liveBalanceUpdatedAt = Date.now();
         }
+        // Log full balance response to diagnose insufficient_balance errors
+        console.log(
+          `[diag:balance-response] ${symbol} full Kalshi response: ${JSON.stringify(_freshBal)}`
+        );
       } catch (_balErr) { /* non-fatal — proceed with cached value */ }
       // Reserve the expected cost against liveBalanceCents so parallel entries
       // don't all see the same full balance and collectively over-spend.
@@ -9250,6 +9254,10 @@ class TradingBot {
                   `[bot] insufficient_balance on ${symbol}: refetched Kalshi balance ${prevBalance}¢ → ${_refetchCents}¢ (reserved=${this._liveBalanceReservedCents})`
                 );
               }
+              // Log full response to diagnose what's happening
+              console.warn(
+                `[diag:insufficient-balance-response] ${symbol} full refetch: ${JSON.stringify(_refetchBal)}`
+              );
             } catch (_refetchErr) {
               console.warn(`[bot] couldn't refetch balance after insufficient_balance: ${_refetchErr.message}`);
             }
