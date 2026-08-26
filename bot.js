@@ -9609,164 +9609,164 @@ class TradingBot {
     this._inRunCycle = true;
     this._cyclePredictions = predictions || null;
     try {
-    this._stoppedSymbolsThisCycle = new Set();
-    this._liveBalanceReservedCents = 0;
-    this._maybeRotateLedger(Date.now());
+      this._stoppedSymbolsThisCycle = new Set();
+      this._liveBalanceReservedCents = 0;
+      this._maybeRotateLedger(Date.now());
 
-    const hasOpenInventory = Array.isArray(this.openTrades) && this.openTrades.length > 0;
-    // Live balance only when trading or managing inventory — never poll Kalshi idle.
-    if (
-      this.config.mode === 'live' &&
-      this.client.hasCredentials &&
-      (this.isRunning || hasOpenInventory) &&
-      (!this.liveBalanceUpdatedAt || Date.now() - this.liveBalanceUpdatedAt > 15000)
-    ) {
+      const hasOpenInventory = Array.isArray(this.openTrades) && this.openTrades.length > 0;
+      // Live balance only when trading or managing inventory — never poll Kalshi idle.
+      if (
+        this.config.mode === 'live' &&
+        this.client.hasCredentials &&
+        (this.isRunning || hasOpenInventory) &&
+        (!this.liveBalanceUpdatedAt || Date.now() - this.liveBalanceUpdatedAt > 15000)
+      ) {
+        try {
+          const balance = await this.client.getBalance();
+          this.liveBalanceCents = Number(balance.balance);
+          this.livePortfolioValueCents = Number(balance.portfolio_value);
+          this.liveBalanceUpdatedAt = Date.now();
+        } catch (err) {
+          this.lastError = `Unable to refresh live balance: ${err.message}`;
+        }
+      }
+
+      // --- first, manage every currently open trade by its own ticker,
+      // regardless of what symbol is currently selected to trade next ---
+      await this.manageOpenPositions(predictions);
+      await this._reviewPendingStopVerdicts();
+      if (isBackupBotRole()) {
+        await this._runBackupRescue();
+      }
+
       try {
-        const balance = await this.client.getBalance();
-        this.liveBalanceCents = Number(balance.balance);
-        this.livePortfolioValueCents = Number(balance.portfolio_value);
-        this.liveBalanceUpdatedAt = Date.now();
-      } catch (err) {
-        this.lastError = `Unable to refresh live balance: ${err.message}`;
+        if (!this.isRunning) {
+          this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
+          return;
+        }
+        const dailyLimitCheck = this._checkDailyLossLimit();
+        if (!dailyLimitCheck.ok) {
+          this.lastDecision = dailyLimitCheck.reason;
+          return;
+        }
+        if (isBackupBotRole()) {
+          this.lastDecision =
+            this.lastDecision && /backup rescue/i.test(this.lastDecision)
+              ? this.lastDecision
+              : 'Backup bot: monitoring primary — no new entries.';
+          return;
+        }
+        // Don't burn Kalshi GETs or open risk if Available can't fund even one contract.
+        // This is a temporary wait, not a permanent halt: a later deposit, settlement,
+        // or refreshed Kalshi balance can make the next cycle eligible again.
+        {
+          const minEntry = isModelStrategyMode(this.config)
+            ? Number(this.config.modelMinEntryCents) || MODEL_MIN_ENTRY_DEFAULT_CENTS
+            : Number(this.config.minEntryCents) || 40;
+          const floorCents = Math.max(1, Math.round(minEntry) || 65);
+          const spendable = this._tradingSpendableCents();
+          if (spendable < floorCents) {
+            const isLive = this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents);
+            const haveStr = isLive
+              ? `Kalshi $${(this.liveBalanceCents / 100).toFixed(2)}`
+              : `Available $${((Number(this._capitalStatus().paperAvailableCents) || 0) / 100).toFixed(2)}`;
+            const waitMessage =
+              `Waiting for funds: ${haveStr} can't fund a new contract (need ≥${floorCents}¢). ` +
+                `New entries will resume automatically once funded.`;
+            this.lastError = waitMessage;
+            this.lastDecision = waitMessage;
+            return;
+          }
+        }
+        if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
+        if (!predictions) return;
+
+        // One open is fine; a second only if something already held is green.
+        // A 3rd settle open is allowed while any hold has tagged 90¢ (half stake).
+        // Model skips the green gate — windows decide; maxOpenPositions still caps.
+        const settleMode = isSettleStrategyMode(this.config);
+        const modelMode = isModelStrategyMode(this.config);
+        if (this.openTrades.length >= 1 && !modelMode) {
+          const extra = await this._canOpenAdditionalPosition();
+          if (!extra.ok) {
+            this.lastDecision = extra.reason;
+            return;
+          }
+        }
+
+        // After a stop, don't stack a second leg while the wound is still fresh —
+        // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
+        // normal maxOpenPositions applies again. Other gates still apply.
+        // Model ignores post-stop max-1 — no Edge protection rules.
+        const preferOtherThan = modelMode ? null : this._lastStopLossSymbol();
+        const maxOneActive = !modelMode && isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
+        if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
+          const mins = Number(this.config.postStopMaxOneMinutes);
+          const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
+          this.lastDecision =
+            `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (${minsLabel}m) (avoids loss strings).`;
+          this._noteProtectionGate(this.lastDecision);
+          return;
+        }
+        if (this._lastProtectionGateKey === 'post-stop-max1') {
+          this._noteProtectionGate(null);
+        }
+
+        // After a stop-loss, scan other coins first instead of immediately
+        // rebuying the same one that just stopped (even if it still ranks highest).
+        const scanAllAfterStop =
+          preferOtherThan != null &&
+          (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
+
+        let opportunity;
+        if (settleMode) {
+          const ranked =
+            this.config.symbol === 'AUTO' || scanAllAfterStop
+              ? await this._rankSettleOpportunities(predictions, { preferOtherThan })
+              : [await this._evaluateSymbolForSettle(this.config.symbol, predictions)].filter(Boolean);
+          await this._openSettleRanked(ranked, { preferOtherThan });
+          return;
+        }
+
+        if (modelMode) {
+          // Fill up to maxOpen with ranked MODEL opportunities in one cycle
+          // (several coins can correlate near the same time). Late cutoff is
+          // per-opportunity — one coin near settle must not freeze the others.
+          const ranked =
+            this.config.symbol === 'AUTO'
+              ? await this._findModelOpportunities(predictions)
+              : [await this._evaluateSymbolForModel(this.config.symbol, predictions)].filter(Boolean);
+          await this._openModelRanked(ranked);
+          return;
+        }
+
+        opportunity =
+          this.config.symbol === 'AUTO' || scanAllAfterStop
+            ? await this._findBestOpportunity(predictions, { preferOtherThan })
+            : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
+
+        if (!opportunity) return;
+
+        if (preferOtherThan && opportunity.symbol !== preferOtherThan) {
+          this.lastDecision =
+            `Post-stop: chose ${opportunity.symbol} over recently stopped ${preferOtherThan} ` +
+            `(checking other cryptos first).`;
+        }
+
+        await this._openPosition({
+          symbol: opportunity.symbol,
+          ticker: opportunity.market.ticker,
+          side: opportunity.side,
+          priceCents: opportunity.priceCents,
+          floorStrike: marketStrikePrice(opportunity.market) ?? opportunity.market.floor_strike,
+          closeTime: opportunity.closeTime,
+          engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
+          engineConfidence: opportunity.window.confidence,
+          strategy: 'edge',
+        });
+      } finally {
+        await this._finishModelShadowCycle(predictions);
       }
-    }
-
-    // --- first, manage every currently open trade by its own ticker,
-    // regardless of what symbol is currently selected to trade next ---
-    await this.manageOpenPositions(predictions);
-    await this._reviewPendingStopVerdicts();
-    if (isBackupBotRole()) {
-      await this._runBackupRescue();
-    }
-
-    try {
-    if (!this.isRunning) {
-      this.lastDecision = 'Bot is stopped; it will continue monitoring any already-open positions but will not open new ones.';
-      return;
-    }
-    const dailyLimitCheck = this._checkDailyLossLimit();
-    if (!dailyLimitCheck.ok) {
-      this.lastDecision = dailyLimitCheck.reason;
-      return;
-    }
-    if (isBackupBotRole()) {
-      this.lastDecision =
-        this.lastDecision && /backup rescue/i.test(this.lastDecision)
-          ? this.lastDecision
-          : 'Backup bot: monitoring primary — no new entries.';
-      return;
-    }
-    // Don't burn Kalshi GETs or open risk if Available can't fund even one contract.
-    // This is a temporary wait, not a permanent halt: a later deposit, settlement,
-    // or refreshed Kalshi balance can make the next cycle eligible again.
-    {
-      const minEntry = isModelStrategyMode(this.config)
-        ? Number(this.config.modelMinEntryCents) || MODEL_MIN_ENTRY_DEFAULT_CENTS
-        : Number(this.config.minEntryCents) || 40;
-      const floorCents = Math.max(1, Math.round(minEntry) || 65);
-      const spendable = this._tradingSpendableCents();
-      if (spendable < floorCents) {
-        const isLive = this.config.mode === 'live' && Number.isFinite(this.liveBalanceCents);
-        const haveStr = isLive
-          ? `Kalshi $${(this.liveBalanceCents / 100).toFixed(2)}`
-          : `Available $${((Number(this._capitalStatus().paperAvailableCents) || 0) / 100).toFixed(2)}`;
-        const waitMessage =
-          `Waiting for funds: ${haveStr} can't fund a new contract (need ≥${floorCents}¢). ` +
-            `New entries will resume automatically once funded.`;
-        this.lastError = waitMessage;
-        this.lastDecision = waitMessage;
-        return;
-      }
-    }
-    if (this.openTrades.length >= this._effectiveMaxOpenPositions()) return;
-    if (!predictions) return;
-
-    // One open is fine; a second only if something already held is green.
-    // A 3rd settle open is allowed while any hold has tagged 90¢ (half stake).
-    // Model skips the green gate — windows decide; maxOpenPositions still caps.
-    const settleMode = isSettleStrategyMode(this.config);
-    const modelMode = isModelStrategyMode(this.config);
-    if (this.openTrades.length >= 1 && !modelMode) {
-      const extra = await this._canOpenAdditionalPosition();
-      if (!extra.ok) {
-        this.lastDecision = extra.reason;
-        return;
-      }
-    }
-
-    // After a stop, don't stack a second leg while the wound is still fresh —
-    // briefly cap at 1 open (postStopMaxOneMinutes, default 1.5m), then
-    // normal maxOpenPositions applies again. Other gates still apply.
-    // Model ignores post-stop max-1 — no Edge protection rules.
-    const preferOtherThan = modelMode ? null : this._lastStopLossSymbol();
-    const maxOneActive = !modelMode && isPostStopMaxOneActive(this._lastStopLossTrade(), this.config);
-    if (preferOtherThan && this.openTrades.length >= 1 && maxOneActive) {
-      const mins = Number(this.config.postStopMaxOneMinutes);
-      const minsLabel = Number.isFinite(mins) && mins > 0 ? mins : POST_STOP_MAX_ONE_DEFAULT_MINUTES;
-      this.lastDecision =
-        `Waiting: after ${preferOtherThan} stop — max 1 open until post-stop calm (${minsLabel}m) (avoids loss strings).`;
-      this._noteProtectionGate(this.lastDecision);
-      return;
-    }
-    if (this._lastProtectionGateKey === 'post-stop-max1') {
-      this._noteProtectionGate(null);
-    }
-
-    // After a stop-loss, scan other coins first instead of immediately
-    // rebuying the same one that just stopped (even if it still ranks highest).
-    const scanAllAfterStop =
-      preferOtherThan != null &&
-      (this.config.symbol === 'AUTO' || preferOtherThan === this.config.symbol);
-
-    let opportunity;
-    if (settleMode) {
-      const ranked =
-        this.config.symbol === 'AUTO' || scanAllAfterStop
-          ? await this._rankSettleOpportunities(predictions, { preferOtherThan })
-          : [await this._evaluateSymbolForSettle(this.config.symbol, predictions)].filter(Boolean);
-      await this._openSettleRanked(ranked, { preferOtherThan });
-      return;
-    }
-
-    if (modelMode) {
-      // Fill up to maxOpen with ranked MODEL opportunities in one cycle
-      // (several coins can correlate near the same time). Late cutoff is
-      // per-opportunity — one coin near settle must not freeze the others.
-      const ranked =
-        this.config.symbol === 'AUTO'
-          ? await this._findModelOpportunities(predictions)
-          : [await this._evaluateSymbolForModel(this.config.symbol, predictions)].filter(Boolean);
-      await this._openModelRanked(ranked);
-      return;
-    }
-
-    opportunity =
-      this.config.symbol === 'AUTO' || scanAllAfterStop
-        ? await this._findBestOpportunity(predictions, { preferOtherThan })
-        : await this._evaluateSymbolForEdge(this.config.symbol, predictions);
-
-    if (!opportunity) return;
-
-    if (preferOtherThan && opportunity.symbol !== preferOtherThan) {
-      this.lastDecision =
-        `Post-stop: chose ${opportunity.symbol} over recently stopped ${preferOtherThan} ` +
-        `(checking other cryptos first).`;
-    }
-
-    await this._openPosition({
-      symbol: opportunity.symbol,
-      ticker: opportunity.market.ticker,
-      side: opportunity.side,
-      priceCents: opportunity.priceCents,
-      floorStrike: marketStrikePrice(opportunity.market) ?? opportunity.market.floor_strike,
-      closeTime: opportunity.closeTime,
-      engineProbability: opportunity.side === 'yes' ? opportunity.window.probabilityUp : opportunity.window.probabilityDown,
-      engineConfidence: opportunity.window.confidence,
-      strategy: 'edge',
-    });
-    } finally {
-      await this._finishModelShadowCycle(predictions);
-    }
     } finally {
       this._inRunCycle = false;
     }
