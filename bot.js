@@ -8997,6 +8997,12 @@ class TradingBot {
       // Shadow-copy the ticker so we can re-assign it inside the loop when the
       // window rolls over between opportunity evaluation and order submission.
       let activeTicker = ticker;
+       
+      // Reset reservation state for this position's entry attempt sequence.
+      // Ensures each position starts fresh, preventing stale reservations from
+      // prior positions in this cycle from affecting this position's balance checks.
+      this._liveBalanceReservedCents = 0;
+       
       // Fetch a fresh balance immediately before ordering — the 15s cached value
       // can be stale if earlier parallel orders consumed funds since the last poll.
       try {
