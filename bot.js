@@ -9236,9 +9236,24 @@ class TradingBot {
       } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
-          // If Kalshi returns insufficient_balance, reduce contract size and retry
+          // If Kalshi returns insufficient_balance, re-fetch balance and reduce contract size
           if (err.message && err.message.includes('insufficient_balance')) {
             insufficientBalanceAttempts++;
+            // Re-fetch the actual balance from Kalshi to see what's really available
+            try {
+              const _refetchBal = await this.client.getBalance();
+              const _refetchCents = Number(_refetchBal.balance);
+              if (Number.isFinite(_refetchCents)) {
+                const prevBalance = this.liveBalanceCents;
+                this.liveBalanceCents = _refetchCents;
+                console.warn(
+                  `[bot] insufficient_balance on ${symbol}: refetched Kalshi balance ${prevBalance}¢ → ${_refetchCents}¢ (reserved=${this._liveBalanceReservedCents})`
+                );
+              }
+            } catch (_refetchErr) {
+              console.warn(`[bot] couldn't refetch balance after insufficient_balance: ${_refetchErr.message}`);
+            }
+             
             if (insufficientBalanceAttempts <= 2 && trade.contracts > 1) {
               const reducedContracts = Math.max(1, Math.floor(trade.contracts / 2));
               console.warn(
