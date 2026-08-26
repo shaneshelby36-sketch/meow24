@@ -8997,12 +8997,6 @@ class TradingBot {
       // Shadow-copy the ticker so we can re-assign it inside the loop when the
       // window rolls over between opportunity evaluation and order submission.
       let activeTicker = ticker;
-       
-      // Reset reservation state for this position's entry attempt sequence.
-      // Ensures each position starts fresh, preventing stale reservations from
-      // prior positions in this cycle from affecting this position's balance checks.
-      this._liveBalanceReservedCents = 0;
-       
       // Fetch a fresh balance immediately before ordering — the 15s cached value
       // can be stale if earlier parallel orders consumed funds since the last poll.
       try {
@@ -9012,6 +9006,10 @@ class TradingBot {
           this.liveBalanceCents = _freshCents;
           this.liveBalanceUpdatedAt = Date.now();
         }
+        // Log full balance response to diagnose insufficient_balance errors
+        console.log(
+          `[diag:balance-response] ${symbol} full Kalshi response: ${JSON.stringify(_freshBal)}`
+        );
       } catch (_balErr) { /* non-fatal — proceed with cached value */ }
       // Reserve the expected cost against liveBalanceCents so parallel entries
       // don't all see the same full balance and collectively over-spend.
@@ -9034,6 +9032,7 @@ class TradingBot {
             ? 4
             : 2;
 
+      let insufficientBalanceAttempts = 0;
       for (let attempt = 0; attempt < maxEntryAttempts; attempt++) {
         if (attempt > 0) await this._sleep(50);
 
@@ -9241,6 +9240,38 @@ class TradingBot {
       } catch (err) {
           lastErr = err;
           console.error(`[bot] Live entry try ${attempt + 1}/${maxEntryAttempts} failed:`, err.message);
+          // If Kalshi returns insufficient_balance, re-fetch balance and reduce contract size
+          if (err.message && err.message.includes('insufficient_balance')) {
+            insufficientBalanceAttempts++;
+            // Re-fetch the actual balance from Kalshi to see what's really available
+            try {
+              const _refetchBal = await this.client.getBalance();
+              const _refetchCents = Number(_refetchBal.balance);
+              if (Number.isFinite(_refetchCents)) {
+                const prevBalance = this.liveBalanceCents;
+                this.liveBalanceCents = _refetchCents;
+                console.warn(
+                  `[bot] insufficient_balance on ${symbol}: refetched Kalshi balance ${prevBalance}¢ → ${_refetchCents}¢ (reserved=${this._liveBalanceReservedCents})`
+                );
+              }
+              // Log full response to diagnose what's happening
+              console.warn(
+                `[diag:insufficient-balance-response] ${symbol} full refetch: ${JSON.stringify(_refetchBal)}`
+              );
+            } catch (_refetchErr) {
+              console.warn(`[bot] couldn't refetch balance after insufficient_balance: ${_refetchErr.message}`);
+            }
+             
+            if (insufficientBalanceAttempts <= 2 && trade.contracts > 1) {
+              const reducedContracts = Math.max(1, Math.floor(trade.contracts / 2));
+              console.warn(
+                `[bot] insufficient_balance on ${symbol}: reducing ${trade.contracts} → ${reducedContracts} contracts for next attempt`
+              );
+              trade.contracts = reducedContracts;
+              // Don't break; try again with fewer contracts on next iteration
+              continue;
+            }
+          }
           // market_not_found: ticker refresh at the top of the next iteration
           // will resolve the new window's ticker, so continue rather than break.
           // Only bail immediately if we've exhausted all attempts or if the
